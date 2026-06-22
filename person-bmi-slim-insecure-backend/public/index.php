@@ -513,6 +513,10 @@ $app->get('/api/staff/persons', function (Request $request, Response $response) 
         ], 401);
     }
 
+    if (!in_array($decoded->role, ['staff', 'admin'])) {
+        return jsonResponse($response, ["error" => "Staff access required"], 403);
+    }
+
     try {
         $pdo = getPDO();
 
@@ -541,6 +545,10 @@ $app->get('/api/staff/persons/{id}', function (Request $request, Response $respo
         return jsonResponse($response, [
             "error" => "Unauthorized"
         ], 401);
+    }
+
+    if (!in_array($decoded->role, ['staff', 'admin'])) {
+        return jsonResponse($response, ["error" => "Staff access required"], 403);
     }
 
     try {
@@ -583,6 +591,10 @@ $app->get('/api/admin/users', function (Request $request, Response $response) {
         ], 401);
     }
 
+    if ($decoded->role !== "admin") {
+        return jsonResponse($response, ["error" => "Admin access required"], 403);
+    }
+
     try {
         $pdo = getPDO();
 
@@ -603,6 +615,18 @@ $app->get('/api/admin/users', function (Request $request, Response $response) {
 });
 
 $app->put('/api/admin/users/{id}/role', function (Request $request, Response $response, array $args) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
+    if ($decoded->role !== "admin") {
+        return jsonResponse($response, ["error" => "Admin access required"], 403);
+    }
+
     try {
         $pdo = getPDO();
         $id = $args['id'];
