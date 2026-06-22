@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
         'name' => 'secj3483/person-bmi-slim-insecure-backend',
-        'pretty_version' => '1.0.0+no-version-set',
-        'version' => '1.0.0.0',
-        'reference' => null,
+        'pretty_version' => 'dev-main',
+        'version' => 'dev-main',
+        'reference' => '889e6a9baf8ed2fb0b22c08966c91f1576c18ec6',
         'type' => 'project',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -104,9 +104,9 @@
             'dev_requirement' => false,
         ),
         'secj3483/person-bmi-slim-insecure-backend' => array(
-            'pretty_version' => '1.0.0+no-version-set',
-            'version' => '1.0.0.0',
-            'reference' => null,
+            'pretty_version' => 'dev-main',
+            'version' => 'dev-main',
+            'reference' => '889e6a9baf8ed2fb0b22c08966c91f1576c18ec6',
             'type' => 'project',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

@@ -447,6 +447,8 @@ $app->get('/api/staff/persons/{id}', function (Request $request, Response $respo
                 JOIN users ON persons.user_id = users.id
                 WHERE persons.id = $id";
 
+        // Test commit message
+
         $person = $pdo->query($sql)->fetch();
 
         if (!$person) {
