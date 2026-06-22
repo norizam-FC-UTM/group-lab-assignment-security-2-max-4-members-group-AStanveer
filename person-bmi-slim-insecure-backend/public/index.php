@@ -118,6 +118,25 @@ function exposeException(Response $response, Throwable $e): Response
     ], 500);
 }
 
+// FIX 2: Backend BMI calculation.
+function calculateBmi($height, $weight)
+{
+    return round($weight / ($height * $height), 2);
+}
+
+function getBmiCategory($bmi)
+{
+    if ($bmi < 18.5) {
+        return "Underweight";
+    } elseif ($bmi < 25) {
+        return "Normal";
+    } elseif ($bmi < 30) {
+        return "Overweight";
+    } else {
+        return "Obese";
+    }
+}
+
 // ----------------------------------------------------------
 // Root routes 
 // ----------------------------------------------------------
@@ -298,16 +317,16 @@ $app->post('/api/persons', function (Request $request, Response $response) {
 
         // INSECURE:
         // - Trusts user_id from frontend.
-        // - Trusts bmi and category from frontend.
-        // - Does not calculate BMI at backend.
         $user_id = $data['user_id'] ?? 1;
         $name = $data['name'] ?? '';
         $age = $data['age'] ?? 0;
         $height = $data['height'] ?? 0;
         $weight = $data['weight'] ?? 0;
-        $bmi = $data['bmi'] ?? 0;
-        $category = $data['category'] ?? '';
         $notes = $data['notes'] ?? '';
+
+        // FIX 2: bmi and category are calculated at the backend, not trusted from frontend.
+        $bmi = calculateBmi($height, $weight);
+        $category = getBmiCategory($bmi);
 
         $sql = "INSERT INTO persons (user_id, name, age, height, weight, bmi, category, notes)
                 VALUES ($user_id, '$name', $age, $height, $weight, $bmi, '$category', '$notes')";
