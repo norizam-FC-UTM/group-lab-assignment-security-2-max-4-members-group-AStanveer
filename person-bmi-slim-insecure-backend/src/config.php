@@ -6,10 +6,24 @@
 // Students should later discuss why secrets/configuration should
 // not be hardcoded in real projects.
 
+//return [
+  //  'db_host' => '127.0.0.1',
+    // 'db_name' => 'security_bmi_lab',
+   // 'db_user' => 'root',
+   // 'db_pass' => '',
+  //  'db_charset' => 'utf8mb4'
+//];
+
+
+// ==========================================================
+// MAMP CONFIGURATION
+// ==========================================================
+
 return [
-    'db_host' => '127.0.0.1',
-    'db_name' => 'security_bmi_lab',
+    'db_host' => 'localhost',      
+    'db_port' => 8889,              
+    'db_name' => 'security_bmi_lab',     
     'db_user' => 'root',
-    'db_pass' => '',
+    'db_pass' => 'root',        
     'db_charset' => 'utf8mb4'
 ];

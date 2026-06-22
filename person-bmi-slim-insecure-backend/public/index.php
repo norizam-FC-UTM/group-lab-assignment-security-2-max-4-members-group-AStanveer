@@ -163,12 +163,16 @@ $app->post('/api/register', function (Request $request, Response $response) {
         // INSECURE: returns password/password_hash.
         $user = $pdo->query("SELECT * FROM users WHERE id = $id")->fetch();
 
+        // ==========================================================
+        // FIX 10: Remove Sensitive Data from API Response
+        // ==========================================================
+        $safeUser = $pdo->query("SELECT id, name, email, role, created_at FROM users WHERE id = $id")->fetch();
+
         return jsonResponse($response, [
-            'message' => 'User registered. This route is intentionally insecure.',
-            'user' => $user,
-            'debug_received_body' => $data,
-            'debug_sql' => $sql
+            'message' => 'User registered successfully.',
+            'user' => $safeUser  // No password_hash
         ], 201);
+
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
@@ -204,12 +208,22 @@ $app->post('/api/login', function (Request $request, Response $response) {
         // INSECURE: fake unsigned token with no expiry.
         $token = createFakeToken($user);
 
+        // ==========================================================
+        // FIX 10: Remove Sensitive Data from API Response
+    
+        // ==========================================================
+        $safeUser = [
+            'id' => $user['id'],
+            'name' => $user['name'],
+            'email' => $user['email'],
+            'role' => $user['role'],
+            'created_at' => $user['created_at']
+        ];
+
         return jsonResponse($response, [
-            'message' => 'Login successful. This token is intentionally insecure.',
+            'message' => 'Login successful.',
             'token' => $token,
-            'user' => $user, // INSECURE: exposes all user fields.
-            'debug_received_body' => $data,
-            'debug_sql' => $sql
+            'user' => $safeUser  // No password_hash
         ]);
     } catch (Throwable $e) {
         return exposeException($response, $e);
@@ -232,11 +246,16 @@ $app->get('/api/profile', function (Request $request, Response $response) {
         // INSECURE: SELECT * returns password/password_hash.
         $user = $pdo->query("SELECT * FROM users WHERE id = $userId")->fetch();
 
+        // ==========================================================
+        // FIX 10: Remove Sensitive Data from API Response
+        // ==========================================================
+        $safeUser = $pdo->query("SELECT id, name, email, role, created_at FROM users WHERE id = $userId")->fetch();
+
         return jsonResponse($response, [
-            'message' => 'Profile returned. This route trusts insecure token/default user.',
-            'user' => $user,
-            'token_payload_trusted_by_backend' => $fakeUser
+            'message' => 'Profile returned.',
+            'user' => $safeUser  // No password_hash
         ]);
+
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
@@ -340,54 +359,126 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
         $pdo = getPDO();
         $id = $args['id'];
         $data = getRequestData($request);
-
-        // INSECURE MASS ASSIGNMENT:
-        // Updates almost any field sent by the frontend.
-        // You should whitelist allowed fields and calculate bmi/category at backend.
-        $allowedInInsecureStarter = [
-            'user_id',
-            'name',
-            'age',
-            'height',
-            'weight',
-            'bmi',
-            'category',
-            'notes'
-        ];
-
-        $sets = [];
-
-        foreach ($allowedInInsecureStarter as $field) {
-            if (array_key_exists($field, $data)) {
-                $value = $data[$field];
-
-                if (is_numeric($value)) {
-                    $sets[] = "$field = $value";
-                } else {
-                    $escaped = str_replace("'", "''", (string) $value);
-                    $sets[] = "$field = '$escaped'";
-                }
+        
+        // ==========================================================
+        // FIX 9: PREVENT UNAUTHORIZED FIELD UPDATE
+        // Follows Dr's instructions exactly
+        // ==========================================================
+        
+        // 1. Get user from token
+        $fakeUser = getFakeUserFromToken($request);
+        if (!$fakeUser) {
+            return jsonResponse($response, ['error' => 'Unauthorized - Please login'], 401);
+        }
+        
+        $currentUserId = $fakeUser['user_id'];
+        $currentUserRole = $fakeUser['role'] ?? 'user';
+        
+        // 2. Get existing record to check ownership
+        $sql = "SELECT * FROM persons WHERE id = $id";
+        $person = $pdo->query($sql)->fetch();
+        
+        if (!$person) {
+            return jsonResponse($response, ['error' => 'Record not found'], 404);
+        }
+        
+        // 3. Check ownership - only owner or admin can update
+        if ($currentUserId != $person['user_id'] && $currentUserRole !== 'admin') {
+            return jsonResponse($response, [
+                'error' => 'Access denied - You can only update your own records'
+            ], 403);
+        }
+        
+        // ==========================================================
+        // DR'S EXACT INSTRUCTION: Allow only safe fields
+        // ==========================================================
+        $allowedFields = ['name', 'age', 'height', 'weight', 'notes'];
+        $cleanData = [];
+        
+        foreach ($allowedFields as $field) {
+            if (isset($data[$field])) {
+                $cleanData[$field] = $data[$field];
             }
         }
-
-        if (!$sets) {
-            return jsonResponse($response, [
-                'error' => 'No fields to update',
-                'debug_received_body' => $data
-            ], 400);
+        // ==========================================================
+        // END OF DR'S INSTRUCTION
+        // ==========================================================
+        
+        // 4. Validate the allowed fields
+        if (isset($cleanData['name']) && trim($cleanData['name']) === '') {
+            return jsonResponse($response, ['error' => 'Name is required'], 400);
         }
-
-        $sql = "UPDATE persons SET " . implode(', ', $sets) . " WHERE id = $id";
+        
+        if (isset($cleanData['age']) && ($cleanData['age'] < 1 || $cleanData['age'] > 120)) {
+            return jsonResponse($response, ['error' => 'Age must be between 1 and 120'], 400);
+        }
+        
+        if (isset($cleanData['height']) && ($cleanData['height'] < 0.5 || $cleanData['height'] > 2.5)) {
+            return jsonResponse($response, ['error' => 'Height must be between 0.5 and 2.5 meters'], 400);
+        }
+        
+        if (isset($cleanData['weight']) && ($cleanData['weight'] < 2 || $cleanData['weight'] > 300)) {
+            return jsonResponse($response, ['error' => 'Weight must be between 2 and 300 kg'], 400);
+        }
+        
+        // ==========================================================
+        // DR'S EXACT INSTRUCTION: Calculate BMI and category 
+        // after height and weight are updated
+        // ==========================================================
+        $height = $cleanData['height'] ?? $person['height'];
+        $weight = $cleanData['weight'] ?? $person['weight'];
+        
+        // Calculate BMI
+        if ($height > 0 && $weight > 0) {
+            $bmi = round($weight / ($height * $height), 2);
+            
+            // Calculate category
+            if ($bmi < 18.5) {
+                $category = "Underweight";
+            } elseif ($bmi < 25) {
+                $category = "Normal";
+            } elseif ($bmi < 30) {
+                $category = "Overweight";
+            } else {
+                $category = "Obese";
+            }
+        } else {
+            $bmi = $person['bmi'];
+            $category = $person['category'];
+        }
+        // ==========================================================
+        // END OF DR'S INSTRUCTION
+        // ==========================================================
+        
+        // 5. Build UPDATE with ONLY allowed fields + calculated values
+        $name = $cleanData['name'] ?? $person['name'];
+        $age = $cleanData['age'] ?? $person['age'];
+        $height = $cleanData['height'] ?? $person['height'];
+        $weight = $cleanData['weight'] ?? $person['weight'];
+        $notes = $cleanData['notes'] ?? $person['notes'];
+        
+        // IMPORTANT: user_id, role, bmi, category, password_hash are NOT allowed
+        // These are controlled by the backend
+        $sql = "UPDATE persons SET 
+                name = '$name', 
+                age = $age, 
+                height = $height, 
+                weight = $weight, 
+                bmi = $bmi, 
+                category = '$category', 
+                notes = '$notes' 
+                WHERE id = $id AND user_id = " . $person['user_id'];
+        
         $pdo->exec($sql);
-
-        $person = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
-
+        
+        // 6. Get updated record
+        $updatedPerson = $pdo->query("SELECT id, user_id, name, age, height, weight, bmi, category, notes, created_at FROM persons WHERE id = $id")->fetch();
+        
         return jsonResponse($response, [
-            'message' => 'BMI record updated. This route allows unsafe field updates.',
-            'person' => $person,
-            'debug_received_body' => $data,
-            'debug_sql' => $sql
+            'message' => 'BMI record updated securely.',
+            'person' => $updatedPerson
         ]);
+        
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
@@ -476,10 +567,15 @@ $app->get('/api/admin/users', function (Request $request, Response $response) {
         $sql = "SELECT * FROM users ORDER BY id ASC";
         $users = $pdo->query($sql)->fetchAll();
 
+        // ==========================================================
+        // FIX 10: Remove Sensitive Data from API Response
+        // ==========================================================
+        $sql = "SELECT id, name, email, role, created_at FROM users ORDER BY id ASC";
+        $users = $pdo->query($sql)->fetchAll();
+
         return jsonResponse($response, [
-            'message' => 'All users returned without admin role check. Sensitive fields exposed.',
-            'users' => $users,
-            'debug_sql' => $sql
+            'message' => 'All users returned.',
+            'users' => $users  
         ]);
     } catch (Throwable $e) {
         return exposeException($response, $e);
