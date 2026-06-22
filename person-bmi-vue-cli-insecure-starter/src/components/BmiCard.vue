@@ -14,8 +14,7 @@
        <!-- Investigation question:
      This renders notes as HTML.
      What happens if notes contains an XSS payload? -->
-      <div v-html="person.notes"></div> 
-      // i.e safer to use <p>{{ person.notes }}</p>
+      <p v-text="person.notes"></p>
     </div>
 
     <div class="actions">
