@@ -358,6 +358,16 @@ $app->get('/api/persons/{id}', function (Request $request, Response $response, a
             return jsonResponse($response, ['error' => 'Record not found'], 404);
         }
 
+        $currentUserId = $decoded['user_id'];
+        $currentUserRole = $decoded['role'];
+        $recordOwnerId = $person['user_id'];
+
+        if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
+            return jsonResponse($response, [
+                "error" => "Access denied"
+            ], 403);
+        }
+
         return jsonResponse($response, [
             'message' => 'Record returned without ownership check.',
             'person' => $person,
@@ -381,6 +391,23 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
         $pdo = getPDO();
         $id = $args['id'];
         $data = getRequestData($request);
+
+        $sql = "SELECT * FROM persons WHERE id = $id";
+        $person = $pdo->query($sql)->fetch();
+
+        if (!$person) {
+            return jsonResponse($response, ['error' => 'Record not found'], 404);
+        }
+
+        $currentUserId = $decoded->user_id;
+        $currentUserRole = $decoded->role;
+        $recordOwnerId = $person['user_id'];
+
+        if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
+            return jsonResponse($response, [
+                "error" => "Access denied"
+            ], 403);
+        }
 
         // INSECURE MASS ASSIGNMENT:
         // Updates almost any field sent by the frontend.
@@ -421,8 +448,6 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
         $sql = "UPDATE persons SET " . implode(', ', $sets) . " WHERE id = $id";
         $pdo->exec($sql);
 
-        $person = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
-
         return jsonResponse($response, [
             'message' => 'BMI record updated. This route allows unsafe field updates.',
             'person' => $person,
@@ -447,7 +472,23 @@ $app->delete('/api/persons/{id}', function (Request $request, Response $response
         $pdo = getPDO();
         $id = $args['id'];
 
-        // INSECURE: No auth, no ownership check, no role check.
+        $sql = "SELECT * FROM persons WHERE id = $id";
+        $person = $pdo->query($sql)->fetch();
+
+        if (!$person) {
+            return jsonResponse($response, ['error' => 'Record not found'], 404);
+        }
+
+        $currentUserId = $decoded->user_id;
+        $currentUserRole = $decoded->role;
+        $recordOwnerId = $person['user_id'];
+
+        if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
+            return jsonResponse($response, [
+                "error" => "Access denied"
+            ], 403);
+        }
+
         $sql = "DELETE FROM persons WHERE id = $id";
         $pdo->exec($sql);
 
