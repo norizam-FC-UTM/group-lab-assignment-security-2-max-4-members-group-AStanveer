@@ -110,7 +110,7 @@ function getFakeUserFromToken(Request $request): ?array
 
 // ==========================================================
 // FIX 12: Secure Error Handling
-// Return generic error, log internally
+// Return generic error and log internally
 // ==========================================================
 function exposeException(Response $response, Throwable $e): Response
 {
