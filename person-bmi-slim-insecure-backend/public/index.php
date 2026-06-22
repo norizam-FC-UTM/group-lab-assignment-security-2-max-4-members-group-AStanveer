@@ -382,9 +382,7 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
     $decoded = verifyTokenFromRequest($request);
 
     if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
+        return jsonResponse($response, ["error" => "Unauthorized"], 401);
     }
 
     try {
@@ -404,53 +402,62 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
         $recordOwnerId = $person['user_id'];
 
         if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
-            return jsonResponse($response, [
-                "error" => "Access denied"
-            ], 403);
+            return jsonResponse($response, ["error" => "Access denied"], 403);
         }
 
-        // INSECURE MASS ASSIGNMENT:
-        // Updates almost any field sent by the frontend.
-        // You should whitelist allowed fields and calculate bmi/category at backend.
-        $allowedInInsecureStarter = [
-            'user_id',
-            'name',
-            'age',
-            'height',
-            'weight',
-            'bmi',
-            'category',
-            'notes'
-        ];
+        $allowedFields = ['name', 'age', 'height', 'weight', 'notes'];
+        $cleanData = [];
 
-        $sets = [];
-
-        foreach ($allowedInInsecureStarter as $field) {
-            if (array_key_exists($field, $data)) {
-                $value = $data[$field];
-
-                if (is_numeric($value)) {
-                    $sets[] = "$field = $value";
-                } else {
-                    $escaped = str_replace("'", "''", (string) $value);
-                    $sets[] = "$field = '$escaped'";
-                }
+        foreach ($allowedFields as $field) {
+            if (isset($data[$field])) {
+                $cleanData[$field] = $data[$field];
             }
         }
 
-        if (!$sets) {
+        if (!$cleanData) {
             return jsonResponse($response, [
                 'error' => 'No fields to update',
                 'debug_received_body' => $data
             ], 400);
         }
 
+        $height = isset($cleanData['height']) ? (float) $cleanData['height'] : (float) $person['height'];
+        $weight = isset($cleanData['weight']) ? (float) $cleanData['weight'] : (float) $person['weight'];
+
+        if ($height > 0) {
+            $heightInMetres = $height / 100;
+            $bmi = round($weight / ($heightInMetres * $heightInMetres), 2);
+
+            $category = match(true) {
+                $bmi < 18.5 => 'Underweight',
+                $bmi < 25.0 => 'Normal',
+                $bmi < 30.0 => 'Overweight',
+                default     => 'Obese'
+            };
+
+            $cleanData['bmi'] = $bmi;
+            $cleanData['category'] = $category;
+        }
+
+        $sets = [];
+
+        foreach ($cleanData as $field => $value) {
+            if (is_numeric($value)) {
+                $sets[] = "$field = $value";
+            } else {
+                $escaped = str_replace("'", "''", (string) $value);
+                $sets[] = "$field = '$escaped'";
+            }
+        }
+
         $sql = "UPDATE persons SET " . implode(', ', $sets) . " WHERE id = $id";
         $pdo->exec($sql);
 
+        $updated = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
+
         return jsonResponse($response, [
-            'message' => 'BMI record updated. This route allows unsafe field updates.',
-            'person' => $person,
+            'message' => 'Record updated.',
+            'person' => $updated,
             'debug_received_body' => $data,
             'debug_sql' => $sql
         ]);
