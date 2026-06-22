@@ -84,7 +84,8 @@ function createFakeToken(array $user): string
         'user_id' => $user['id'],
         'role' => $user['role'],
         'email' => $user['email'],
-        'note' => 'INSECURE_FAKE_TOKEN_NO_SIGNATURE_NO_EXPIRY'
+        'iat' => time(),
+        "exp" => time() + 3600
     ];
 
     return base64_encode(json_encode($payload));
