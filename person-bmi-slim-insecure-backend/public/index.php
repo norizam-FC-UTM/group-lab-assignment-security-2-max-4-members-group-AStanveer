@@ -279,8 +279,23 @@ $app->post('/api/persons', function (Request $request, Response $response) {
         $pdo = getPDO();
         $data = getRequestData($request);
 
+        if (!isset($data['name']) || trim($data['name']) === '') {
+            return jsonResponse($response, ["error" => "Name is required"], 400);
+        }
+
+        if (!isset($data['age']) || $data['age'] < 1 || $data['age'] > 120) {
+            return jsonResponse($response, ["error" => "Age must be between 1 and 120"], 400);
+        }
+
+        if (!isset($data['height']) || $data['height'] < 0.5 || $data['height'] > 2.5) {
+            return jsonResponse($response, ["error" => "Height must be between 0.5 and 2.5 meters"], 400);
+        }
+
+        if (!isset($data['weight']) || $data['weight'] < 2 || $data['weight'] > 300) {
+            return jsonResponse($response, ["error" => "Weight must be between 2 and 300 kg"], 400);
+        }
+
         // INSECURE:
-        // - No backend validation.
         // - Trusts user_id from frontend.
         // - Trusts bmi and category from frontend.
         // - Does not calculate BMI at backend.
