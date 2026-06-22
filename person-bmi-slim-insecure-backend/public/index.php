@@ -237,8 +237,6 @@ $app->get('/api/profile', function (Request $request, Response $response) {
             ], 401);
         }
 
-
-
         $userId = $decoded['user_id'] ?? 1;
 
         // INSECURE: SELECT * returns password/password_hash.
@@ -264,9 +262,16 @@ $app->get('/api/persons', function (Request $request, Response $response) {
         // INSECURE:
         // Trusts unsigned token. If no token, returns all records.
         // Also accepts ?user_id= to override owner.
-        $fakeUser = getFakeUserFromToken($request);
+        $decoded = verifyTokenFromRequest($request);
+
+        if (!$decoded) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
         $params = $request->getQueryParams();
-        $userId = $params['user_id'] ?? ($fakeUser['user_id'] ?? null);
+        $userId = $params['user_id'] ?? ($decoded['user_id'] ?? null);
 
         if ($userId) {
             $sql = "SELECT * FROM persons WHERE user_id = $userId ORDER BY id DESC";
@@ -290,6 +295,14 @@ $app->post('/api/persons', function (Request $request, Response $response) {
     try {
         $pdo = getPDO();
         $data = getRequestData($request);
+
+        $decoded = verifyTokenFromRequest($request);
+
+        if (!$decoded) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
 
         // INSECURE:
         // - No backend validation.
@@ -325,6 +338,14 @@ $app->post('/api/persons', function (Request $request, Response $response) {
 });
 
 $app->get('/api/persons/{id}', function (Request $request, Response $response, array $args) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
         $id = $args['id'];
@@ -348,6 +369,14 @@ $app->get('/api/persons/{id}', function (Request $request, Response $response, a
 });
 
 $app->put('/api/persons/{id}', function (Request $request, Response $response, array $args) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
         $id = $args['id'];
@@ -406,6 +435,14 @@ $app->put('/api/persons/{id}', function (Request $request, Response $response, a
 });
 
 $app->delete('/api/persons/{id}', function (Request $request, Response $response, array $args) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
         $id = $args['id'];
@@ -427,6 +464,14 @@ $app->delete('/api/persons/{id}', function (Request $request, Response $response
 // Staff routes
 // ----------------------------------------------------------
 $app->get('/api/staff/persons', function (Request $request, Response $response) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
 
@@ -449,6 +494,14 @@ $app->get('/api/staff/persons', function (Request $request, Response $response) 
 });
 
 $app->get('/api/staff/persons/{id}', function (Request $request, Response $response, array $args) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
         $id = $args['id'];
@@ -481,6 +534,14 @@ $app->get('/api/staff/persons/{id}', function (Request $request, Response $respo
 // Admin routes
 // ----------------------------------------------------------
 $app->get('/api/admin/users', function (Request $request, Response $response) {
+    $decoded = verifyTokenFromRequest($request);
+
+    if (!$decoded) {
+        return jsonResponse($response, [
+            "error" => "Unauthorized"
+        ], 401);
+    }
+
     try {
         $pdo = getPDO();
 
