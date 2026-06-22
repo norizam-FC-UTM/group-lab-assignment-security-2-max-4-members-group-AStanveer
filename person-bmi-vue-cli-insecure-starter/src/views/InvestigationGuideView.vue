@@ -50,6 +50,7 @@ Authorization: Bearer token-of-user-1</div>
       <div class="code">&lt;img src=x onerror="alert('XSS')"&gt;</div>
       <p>This app intentionally renders notes using <code>v-html</code>.</p>
       <p><strong>Fix idea:</strong> use Vue interpolation: <code v-pre>{{ person.notes }}</code></p>
+      <p> FIXED </p>
     </div>
 
     <div class="card">

@@ -108,16 +108,22 @@ function getFakeUserFromToken(Request $request): ?array
     return is_array($payload) ? $payload : null;
 }
 
+// ==========================================================
+// FIX 12: Secure Error Handling
+// Return generic error, log internally
+// ==========================================================
 function exposeException(Response $response, Throwable $e): Response
 {
-    // INSECURE: exposes detailed internal error to API client.
+    // Log error internally (not shown to user)
+    error_log("Error: " . $e->getMessage());
+    error_log("File: " . $e->getFile() . ":" . $e->getLine());
+    error_log("Trace: " . $e->getTraceAsString());
+    
+    // Return generic error to client
     return jsonResponse($response, [
-        'error' => $e->getMessage(),
-        'file' => $e->getFile(),
-        'line' => $e->getLine()
+        "error" => "Unable to process request"
     ], 500);
 }
-
 // ----------------------------------------------------------
 // Root routes 
 // ----------------------------------------------------------
