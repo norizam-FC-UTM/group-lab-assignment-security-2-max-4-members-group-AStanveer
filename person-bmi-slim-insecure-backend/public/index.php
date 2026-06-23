@@ -12,11 +12,12 @@
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Slim\Factory\AppFactory;
-use Firebase\JWT\JWT;
-use Firebase\JWT\Key;
 
 require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/../src/db.php';
+
+// FIX 5: Secret key used to sign/verify JWTs.
+define('JWT_SECRET', (require __DIR__ . '/../src/config.php')['jwt_secret']);
 
 $app = AppFactory::create();
 
@@ -25,7 +26,7 @@ $app->addBodyParsingMiddleware();
 
 // Helpful for development error display.
 // INSECURE: In production, detailed errors should not be shown to users.
-$app->addErrorMiddleware(false, false, false);
+$app->addErrorMiddleware(true, true, true);
 
 // ----------------------------------------------------------
 // CORS for Vue CLI frontend
@@ -78,26 +79,40 @@ function getRequestData(Request $request): array
     return is_array($data) ? $data : [];
 }
 
-// INSECURE: This is NOT a real JWT.
-// This is just base64 JSON. You should replace this with real signed JWT sebagai pembaikan.
+// FIX 5: Base64url helpers (JWT uses base64url, not standard base64).
+function base64UrlEncode(string $data): string
+{
+    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+}
+
+function base64UrlDecode(string $data): string
+{
+    return base64_decode(strtr($data, '-_', '+/'));
+}
+
+// FIX 5: Real signed JWT (HMAC-SHA256), hand-rolled with no external library.
+// Payload only carries user_id, role, iat, exp - never password, password_hash,
+// the secret key, or other private personal data.
 function createFakeToken(array $user): string
 {
+    $header = ['alg' => 'HS256', 'typ' => 'JWT'];
     $payload = [
         'user_id' => $user['id'],
         'role' => $user['role'],
-        'email' => $user['email'],
         'iat' => time(),
-        "exp" => time() + 3600
+        'exp' => time() + 3600
     ];
 
-    // ==========================================================
-    // FIX 5: Fix JWT Authentication
-    // ==========================================================
-    return JWT::encode($payload, "$2a$12$0WZCmmeBrxrH5HcmgQLPrOd/P6PqA3fnV5yPYfSNHduYaCizpE7cW", 'HS256');
+    $headerEncoded = base64UrlEncode(json_encode($header));
+    $payloadEncoded = base64UrlEncode(json_encode($payload));
+
+    $signature = hash_hmac('sha256', "$headerEncoded.$payloadEncoded", JWT_SECRET, true);
+    $signatureEncoded = base64UrlEncode($signature);
+
+    return "$headerEncoded.$payloadEncoded.$signatureEncoded";
 }
 
-// INSECURE: This trusts an unsigned, editable token.
-// You should replace this with proper JWT verification.
+// FIX 5: Verify the signature (timing-safe) and expiry before trusting the payload.
 function getFakeUserFromToken(Request $request): ?array
 {
     $auth = $request->getHeaderLine('Authorization');
@@ -106,32 +121,60 @@ function getFakeUserFromToken(Request $request): ?array
         return null;
     }
 
-    try {
-        $decoded = JWT::decode($matches[1], new Key("$2a$12$0WZCmmeBrxrH5HcmgQLPrOd/P6PqA3fnV5yPYfSNHduYaCizpE7cW", "HS256"));
-        return (array) $decoded;
-    } catch (\Exception $e) {
+    $parts = explode('.', $matches[1]);
+
+    if (count($parts) !== 3) {
         return null;
     }
+
+    [$headerEncoded, $payloadEncoded, $signatureEncoded] = $parts;
+
+    $expectedSignature = hash_hmac('sha256', "$headerEncoded.$payloadEncoded", JWT_SECRET, true);
+
+    if (!hash_equals($expectedSignature, base64UrlDecode($signatureEncoded))) {
+        return null;
+    }
+
+    $payload = json_decode(base64UrlDecode($payloadEncoded), true);
+
+    if (!is_array($payload) || !isset($payload['exp']) || $payload['exp'] < time()) {
+        return null;
+    }
+
+    return $payload;
 }
 
-// ==========================================================
-// FIX 12: Secure Error Handling
-// Return generic error and log internally
-// ==========================================================
 function exposeException(Response $response, Throwable $e): Response
 {
-    // Log error internally (not shown to user)
-    error_log("Error: " . $e->getMessage());
-    error_log("File: " . $e->getFile() . ":" . $e->getLine());
-    error_log("Trace: " . $e->getTraceAsString());
-    
-    // Return generic error to client
+    // FIX 12: Log details server-side; never expose them to the client.
+    error_log($e->getMessage());
+
     return jsonResponse($response, [
         "error" => "Unable to process request"
     ], 500);
 }
+
+// FIX 2: Backend BMI calculation.
+function calculateBmi($height, $weight)
+{
+    return round($weight / ($height * $height), 2);
+}
+
+function getBmiCategory($bmi)
+{
+    if ($bmi < 18.5) {
+        return "Underweight";
+    } elseif ($bmi < 25) {
+        return "Normal";
+    } elseif ($bmi < 30) {
+        return "Overweight";
+    } else {
+        return "Obese";
+    }
+}
+
 // ----------------------------------------------------------
-// Root routes 
+// Root routes
 // ----------------------------------------------------------
 $app->get('/', function (Request $request, Response $response) {
     return jsonResponse($response, [
@@ -155,31 +198,33 @@ $app->post('/api/register', function (Request $request, Response $response) {
         $pdo = getPDO();
         $data = getRequestData($request);
 
-        // ==========================================================
-        // FIX 12: Use Prepared Statements
-        // ==========================================================
+        // INSECURE:
+        // - No backend validation.
+        // - Role is accepted from frontend, so user can register as admin/staff.
         $name = $data['name'] ?? '';
         $email = $data['email'] ?? '';
         $password = $data['password'] ?? '';
         $role = $data['role'] ?? 'user';
 
-        // SECURE: Prepared statement prevents SQL Injection
-        $sql = "INSERT INTO users (name, email, password, password_hash, role)
-                VALUES (?, ?, ?, ?, ?)";
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([$name, $email, $password, $password, $role]);
+        // FIX 3: Hash the password before storing it; plaintext is never saved.
+        $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+
+        $sql = "INSERT INTO users (name, email, password_hash, role)
+                VALUES ('$name', '$email', '$passwordHash', '$role')";
+
+        // INSECURE: direct SQL execution with user input.
+        $pdo->exec($sql);
         $id = $pdo->lastInsertId();
 
-        // ==========================================================
-        // FIX 10: Remove Sensitive Data from API Response
-        // ==========================================================
-        $safeUser = $pdo->query("SELECT id, name, email, role, created_at FROM users WHERE id = $id")->fetch();
+        // FIX 10: Only return safe fields, never password/password_hash.
+        $stmt = $pdo->prepare("SELECT id, name, email, role FROM users WHERE id = ?");
+        $stmt->execute([$id]);
+        $user = $stmt->fetch();
 
         return jsonResponse($response, [
-            'message' => 'User registered successfully.',
-            'user' => $safeUser  // No password_hash
+            'message' => 'User registered.',
+            'user' => $user
         ], 201);
-
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
@@ -196,51 +241,33 @@ $app->post('/api/login', function (Request $request, Response $response) {
         $email = $data['email'] ?? '';
         $password = $data['password'] ?? '';
 
-        // ==========================================================
-        // FIX 12: Use Prepared Statements to Prevent SQL Injection
-        // ==========================================================
-        // SECURE: Prepared statement prevents SQL Injection
-        $sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
-        $stmt = $pdo->prepare($sql);
+        // FIX 4: Prepared statement prevents SQL Injection via the email field.
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ?");
         $stmt->execute([$email]);
         $user = $stmt->fetch();
 
-        if (!$user) {
+        // FIX 3: Verify the submitted password against the stored bcrypt hash.
+        if (!$user || !password_verify($password, $user['password_hash'])) {
             return jsonResponse($response, [
-                'error' => 'Invalid login'
-            ], 401);
-        }
-
-        // ==========================================================
-        // FIX 3: Use password_hash verification (if passwords are hashed)
-        // Note: Since your database stores plain passwords, this will fail
-        // For now, keep plain password check
-        // ==========================================================
-        // Check plain password (since database stores plain text)
-        if ($user['password'] !== $password) {
-            return jsonResponse($response, [
-                'error' => 'Invalid login'
+                'error' => 'Invalid email or password'
             ], 401);
         }
 
         // INSECURE: fake unsigned token with no expiry.
         $token = createFakeToken($user);
 
-        // ==========================================================
-        // FIX 10: Remove Sensitive Data from API Response
-        // ==========================================================
+        // FIX 10: Only return safe fields, never password/password_hash.
         $safeUser = [
             'id' => $user['id'],
             'name' => $user['name'],
             'email' => $user['email'],
-            'role' => $user['role'],
-            'created_at' => $user['created_at']
+            'role' => $user['role']
         ];
 
         return jsonResponse($response, [
             'message' => 'Login successful.',
             'token' => $token,
-            'user' => $safeUser  // No password_hash
+            'user' => $safeUser
         ]);
     } catch (Throwable $e) {
         return exposeException($response, $e);
@@ -254,32 +281,28 @@ $app->get('/api/profile', function (Request $request, Response $response) {
     try {
         $pdo = getPDO();
 
-        // INSECURE:
-        // If token missing, defaults to user 1.
-        // If token exists, trusts unsigned editable token.
         $fakeUser = getFakeUserFromToken($request);
 
+        // FIX 6: Reject requests without a valid token.
         if (!$fakeUser) {
             return jsonResponse($response, [
                 "error" => "Unauthorized"
             ], 401);
         }
 
+        // INSECURE: trusts unsigned editable token.
         $userId = $fakeUser['user_id'] ?? 1;
 
-        // INSECURE: SELECT * returns password/password_hash.
-        $user = $pdo->query("SELECT * FROM users WHERE id = $userId")->fetch();
-
-        // ==========================================================
-        // FIX 10: Remove Sensitive Data from API Response
-        // ==========================================================
-        $safeUser = $pdo->query("SELECT id, name, email, role, created_at FROM users WHERE id = $userId")->fetch();
+        // FIX 10: Only return safe fields, never password/password_hash.
+        $stmt = $pdo->prepare("SELECT id, name, email, role FROM users WHERE id = ?");
+        $stmt->execute([$userId]);
+        $user = $stmt->fetch();
 
         return jsonResponse($response, [
             'message' => 'Profile returned.',
-            'user' => $safeUser  // No password_hash
+            'user' => $user,
+            'token_payload_trusted_by_backend' => $fakeUser
         ]);
-
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
@@ -292,19 +315,18 @@ $app->get('/api/persons', function (Request $request, Response $response) {
     try {
         $pdo = getPDO();
 
-        // INSECURE:
-        // Trusts unsigned token. If no token, returns all records.
-        // Also accepts ?user_id= to override owner.
-        $decoded = getFakeUserFromToken($request);
+        $fakeUser = getFakeUserFromToken($request);
 
-        if (!$decoded) {
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
             return jsonResponse($response, [
                 "error" => "Unauthorized"
             ], 401);
         }
 
+        // INSECURE: trusts unsigned token; also accepts ?user_id= to override owner.
         $params = $request->getQueryParams();
-        $userId = $params['user_id'] ?? ($decoded['user_id'] ?? null);
+        $userId = $params['user_id'] ?? ($fakeUser['user_id'] ?? null);
 
         if ($userId) {
             $sql = "SELECT * FROM persons WHERE user_id = $userId ORDER BY id DESC";
@@ -329,27 +351,44 @@ $app->post('/api/persons', function (Request $request, Response $response) {
         $pdo = getPDO();
         $data = getRequestData($request);
 
-        $decoded = getFakeUserFromToken($request);
+        $fakeUser = getFakeUserFromToken($request);
 
-        if (!$decoded) {
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
             return jsonResponse($response, [
                 "error" => "Unauthorized"
             ], 401);
         }
 
+        // FIX 1: Backend validation for BMI data.
+        if (!isset($data['name']) || trim($data['name']) === '') {
+            return jsonResponse($response, ["error" => "Name is required"], 400);
+        }
+
+        if (!isset($data['age']) || $data['age'] < 1 || $data['age'] > 120) {
+            return jsonResponse($response, ["error" => "Age must be between 1 and 120"], 400);
+        }
+
+        if (!isset($data['height']) || $data['height'] < 0.5 || $data['height'] > 2.5) {
+            return jsonResponse($response, ["error" => "Height must be between 0.5 and 2.5 meters"], 400);
+        }
+
+        if (!isset($data['weight']) || $data['weight'] < 2 || $data['weight'] > 300) {
+            return jsonResponse($response, ["error" => "Weight must be between 2 and 300 kg"], 400);
+        }
+
         // INSECURE:
-        // - No backend validation.
         // - Trusts user_id from frontend.
-        // - Trusts bmi and category from frontend.
-        // - Does not calculate BMI at backend.
         $user_id = $data['user_id'] ?? 1;
         $name = $data['name'] ?? '';
         $age = $data['age'] ?? 0;
         $height = $data['height'] ?? 0;
         $weight = $data['weight'] ?? 0;
-        $bmi = $data['bmi'] ?? 0;
-        $category = $data['category'] ?? '';
         $notes = $data['notes'] ?? '';
+
+        // FIX 2: bmi and category are calculated at the backend, not trusted from frontend.
+        $bmi = calculateBmi($height, $weight);
+        $category = getBmiCategory($bmi);
 
         $sql = "INSERT INTO persons (user_id, name, age, height, weight, bmi, category, notes)
                 VALUES ($user_id, '$name', $age, $height, $weight, $bmi, '$category', '$notes')";
@@ -371,19 +410,19 @@ $app->post('/api/persons', function (Request $request, Response $response) {
 });
 
 $app->get('/api/persons/{id}', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
 
-        // TODO: Review whether this route should allow all users to access any record.
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
         $sql = "SELECT * FROM persons WHERE id = $id";
         $person = $pdo->query($sql)->fetch();
 
@@ -391,8 +430,9 @@ $app->get('/api/persons/{id}', function (Request $request, Response $response, a
             return jsonResponse($response, ['error' => 'Record not found'], 404);
         }
 
-        $currentUserId = $decoded['user_id'];
-        $currentUserRole = $decoded['role'];
+        // FIX 7: Owner-based access control. Owner, staff, or admin may view.
+        $currentUserId = $fakeUser['user_id'];
+        $currentUserRole = $fakeUser['role'] ?? 'user';
         $recordOwnerId = $person['user_id'];
 
         if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
@@ -402,7 +442,7 @@ $app->get('/api/persons/{id}', function (Request $request, Response $response, a
         }
 
         return jsonResponse($response, [
-            'message' => 'Record returned without ownership check.',
+            'message' => 'Record returned.',
             'person' => $person,
             'debug_sql' => $sql
         ]);
@@ -412,185 +452,113 @@ $app->get('/api/persons/{id}', function (Request $request, Response $response, a
 });
 
 $app->put('/api/persons/{id}', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
         $data = getRequestData($request);
 
-        $sql = "SELECT * FROM persons WHERE id = $id";
-        $person = $pdo->query($sql)->fetch();
+        $fakeUser = getFakeUserFromToken($request);
 
-        if (!$person) {
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        $existing = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
+
+        if (!$existing) {
             return jsonResponse($response, ['error' => 'Record not found'], 404);
         }
 
-        $currentUserId = $decoded->user_id;
-        $currentUserRole = $decoded->role;
-        $recordOwnerId = $person['user_id'];
+        // FIX 7: Owner-based access control. Owner or admin may update; staff may not.
+        $currentUserId = $fakeUser['user_id'];
+        $currentUserRole = $fakeUser['role'] ?? 'user';
+        $recordOwnerId = $existing['user_id'];
 
-        if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
+        if ($currentUserId != $recordOwnerId && $currentUserRole !== 'admin') {
             return jsonResponse($response, [
                 "error" => "Access denied"
             ], 403);
         }
-        
-        // ==========================================================
-        // FIX 9: PREVENT UNAUTHORIZED FIELD UPDATE
-        // Follows Dr's instructions exactly
-        // ==========================================================
-        
-        // 1. Get user from token
-        $fakeUser = getFakeUserFromToken($request);
-        if (!$fakeUser) {
-            return jsonResponse($response, ['error' => 'Unauthorized - Please login'], 401);
-        }
-        
-        $currentUserId = $fakeUser['user_id'];
-        $currentUserRole = $fakeUser['role'] ?? 'user';
-        
-        // 2. Get existing record to check ownership
-        $sql = "SELECT * FROM persons WHERE id = $id";
-        $person = $pdo->query($sql)->fetch();
-        
-        if (!$person) {
-            return jsonResponse($response, ['error' => 'Record not found'], 404);
-        }
-        
-        // 3. Check ownership - only owner or admin can update
-        if ($currentUserId != $person['user_id'] && $currentUserRole !== 'admin') {
-            return jsonResponse($response, [
-                'error' => 'Access denied - You can only update your own records'
-            ], 403);
-        }
-        
-        // ==========================================================
-        // DR'S EXACT INSTRUCTION: Allow only safe fields
-        // ==========================================================
+
+        // FIX 9: Prevent unauthorized field update.
+        // Only these fields may be changed by the client; user_id, role, bmi,
+        // and category are controlled by the backend and cannot be overwritten.
         $allowedFields = ['name', 'age', 'height', 'weight', 'notes'];
         $cleanData = [];
-        
+
         foreach ($allowedFields as $field) {
             if (isset($data[$field])) {
                 $cleanData[$field] = $data[$field];
             }
         }
-        // ==========================================================
-        // END OF DR'S INSTRUCTION
-        // ==========================================================
-        
-        // 4. Validate the allowed fields
-        if (isset($cleanData['name']) && trim($cleanData['name']) === '') {
-            return jsonResponse($response, ['error' => 'Name is required'], 400);
+
+        if (!$cleanData) {
+            return jsonResponse($response, [
+                'error' => 'No fields to update'
+            ], 400);
         }
-        
-        if (isset($cleanData['age']) && ($cleanData['age'] < 1 || $cleanData['age'] > 120)) {
-            return jsonResponse($response, ['error' => 'Age must be between 1 and 120'], 400);
-        }
-        
-        if (isset($cleanData['height']) && ($cleanData['height'] < 0.5 || $cleanData['height'] > 2.5)) {
-            return jsonResponse($response, ['error' => 'Height must be between 0.5 and 2.5 meters'], 400);
-        }
-        
-        if (isset($cleanData['weight']) && ($cleanData['weight'] < 2 || $cleanData['weight'] > 300)) {
-            return jsonResponse($response, ['error' => 'Weight must be between 2 and 300 kg'], 400);
-        }
-        
-        // ==========================================================
-        // DR'S EXACT INSTRUCTION: Calculate BMI and category 
-        // after height and weight are updated
-        // ==========================================================
-        $height = $cleanData['height'] ?? $person['height'];
-        $weight = $cleanData['weight'] ?? $person['weight'];
-        
-        // Calculate BMI
-        if ($height > 0 && $weight > 0) {
-            $bmi = round($weight / ($height * $height), 2);
-            
-            // Calculate category
-            if ($bmi < 18.5) {
-                $category = "Underweight";
-            } elseif ($bmi < 25) {
-                $category = "Normal";
-            } elseif ($bmi < 30) {
-                $category = "Overweight";
-            } else {
-                $category = "Obese";
-            }
-        } else {
-            $bmi = $person['bmi'];
-            $category = $person['category'];
-        }
-        // ==========================================================
-        // END OF DR'S INSTRUCTION
-        // ==========================================================
-        
-        // 5. Build UPDATE with ONLY allowed fields + calculated values
-        $name = $cleanData['name'] ?? $person['name'];
-        $age = $cleanData['age'] ?? $person['age'];
-        $height = $cleanData['height'] ?? $person['height'];
-        $weight = $cleanData['weight'] ?? $person['weight'];
-        $notes = $cleanData['notes'] ?? $person['notes'];
-        
-        // IMPORTANT: user_id, role, bmi, category, password_hash are NOT allowed
-        // These are controlled by the backend
-        $sql = "UPDATE persons SET 
-                name = '$name', 
-                age = $age, 
-                height = $height, 
-                weight = $weight, 
-                bmi = $bmi, 
-                category = '$category', 
-                notes = '$notes' 
-                WHERE id = $id AND user_id = " . $person['user_id'];
-        
+
+        // FIX 9: bmi and category are recalculated whenever height/weight change.
+        $height = $cleanData['height'] ?? $existing['height'];
+        $weight = $cleanData['weight'] ?? $existing['weight'];
+        $bmi = calculateBmi($height, $weight);
+        $category = getBmiCategory($bmi);
+
+        $name = $cleanData['name'] ?? $existing['name'];
+        $age = $cleanData['age'] ?? $existing['age'];
+        $notes = $cleanData['notes'] ?? $existing['notes'];
+
+        $sql = "UPDATE persons SET
+                name = '$name',
+                age = $age,
+                height = $height,
+                weight = $weight,
+                bmi = $bmi,
+                category = '$category',
+                notes = '$notes'
+                WHERE id = $id";
         $pdo->exec($sql);
-        
-        // 6. Get updated record
-        $updatedPerson = $pdo->query("SELECT id, user_id, name, age, height, weight, bmi, category, notes, created_at FROM persons WHERE id = $id")->fetch();
-        
+
+        $person = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
+
         return jsonResponse($response, [
             'message' => 'BMI record updated securely.',
-            'person' => $updatedPerson
+            'person' => $person
         ]);
-        
     } catch (Throwable $e) {
         return exposeException($response, $e);
     }
 });
 
 $app->delete('/api/persons/{id}', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
 
-        $sql = "SELECT * FROM persons WHERE id = $id";
-        $person = $pdo->query($sql)->fetch();
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        $person = $pdo->query("SELECT * FROM persons WHERE id = $id")->fetch();
 
         if (!$person) {
             return jsonResponse($response, ['error' => 'Record not found'], 404);
         }
 
-        $currentUserId = $decoded->user_id;
-        $currentUserRole = $decoded->role;
+        // FIX 7: Owner-based access control. Owner or admin may delete; staff may not.
+        $currentUserId = $fakeUser['user_id'];
+        $currentUserRole = $fakeUser['role'] ?? 'user';
         $recordOwnerId = $person['user_id'];
 
-        if ($currentUserId != $recordOwnerId && !in_array($currentUserRole, ['staff', 'admin'])) {
+        if ($currentUserId != $recordOwnerId && $currentUserRole !== 'admin') {
             return jsonResponse($response, [
                 "error" => "Access denied"
             ], 403);
@@ -600,7 +568,7 @@ $app->delete('/api/persons/{id}', function (Request $request, Response $response
         $pdo->exec($sql);
 
         return jsonResponse($response, [
-            'message' => 'BMI record deleted without role or ownership check.',
+            'message' => 'BMI record deleted.',
             'debug_sql' => $sql
         ]);
     } catch (Throwable $e) {
@@ -612,22 +580,23 @@ $app->delete('/api/persons/{id}', function (Request $request, Response $response
 // Staff routes
 // ----------------------------------------------------------
 $app->get('/api/staff/persons', function (Request $request, Response $response) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
-    if (!in_array($decoded->role, ['staff', 'admin'])) {
-        return jsonResponse($response, ["error" => "Staff access required"], 403);
-    }
-
     try {
         $pdo = getPDO();
 
-        // INSECURE: No staff/admin role check.
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        // FIX 8: Role-based access control. Staff or admin only.
+        if (!in_array($fakeUser['role'] ?? 'user', ['staff', 'admin'])) {
+            return jsonResponse($response, ["error" => "Staff access required"], 403);
+        }
+
         $sql = "SELECT persons.*, users.email AS owner_email, users.role AS owner_role
                 FROM persons
                 JOIN users ON persons.user_id = users.id
@@ -636,7 +605,7 @@ $app->get('/api/staff/persons', function (Request $request, Response $response) 
         $persons = $pdo->query($sql)->fetchAll();
 
         return jsonResponse($response, [
-            'message' => 'All BMI records returned without staff role check.',
+            'message' => 'All BMI records returned.',
             'persons' => $persons,
             'debug_sql' => $sql
         ]);
@@ -646,23 +615,24 @@ $app->get('/api/staff/persons', function (Request $request, Response $response) 
 });
 
 $app->get('/api/staff/persons/{id}', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
-    if (!in_array($decoded->role, ['staff', 'admin'])) {
-        return jsonResponse($response, ["error" => "Staff access required"], 403);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
 
-        // INSECURE - Review whether this route should allow all users
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        // FIX 8: Role-based access control. Staff or admin only.
+        if (!in_array($fakeUser['role'] ?? 'user', ['staff', 'admin'])) {
+            return jsonResponse($response, ["error" => "Staff access required"], 403);
+        }
+
         $sql = "SELECT persons.*, users.email AS owner_email, users.role AS owner_role
                 FROM persons
                 JOIN users ON persons.user_id = users.id
@@ -688,36 +658,30 @@ $app->get('/api/staff/persons/{id}', function (Request $request, Response $respo
 // Admin routes
 // ----------------------------------------------------------
 $app->get('/api/admin/users', function (Request $request, Response $response) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
-    if ($decoded->role !== "admin") {
-        return jsonResponse($response, ["error" => "Admin access required"], 403);
-    }
-
     try {
         $pdo = getPDO();
 
-        // INSECURE:
-        // - No admin role check.
-        // - SELECT * exposes password/password_hash.
-        $sql = "SELECT * FROM users ORDER BY id ASC";
-        $users = $pdo->query($sql)->fetchAll();
+        $fakeUser = getFakeUserFromToken($request);
 
-        // ==========================================================
-        // FIX 10: Remove Sensitive Data from API Response
-        // ==========================================================
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        // FIX 8: Role-based access control. Admin only.
+        if (($fakeUser['role'] ?? 'user') !== 'admin') {
+            return jsonResponse($response, ["error" => "Admin access required"], 403);
+        }
+
+        // FIX 10: Only return safe fields, never password/password_hash.
         $sql = "SELECT id, name, email, role, created_at FROM users ORDER BY id ASC";
         $users = $pdo->query($sql)->fetchAll();
 
         return jsonResponse($response, [
             'message' => 'All users returned.',
-            'users' => $users  
+            'users' => $users
         ]);
     } catch (Throwable $e) {
         return exposeException($response, $e);
@@ -725,35 +689,37 @@ $app->get('/api/admin/users', function (Request $request, Response $response) {
 });
 
 $app->put('/api/admin/users/{id}/role', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
-    if ($decoded->role !== "admin") {
-        return jsonResponse($response, ["error" => "Admin access required"], 403);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
         $data = getRequestData($request);
         $role = $data['role'] ?? 'user';
 
-        // INSECURE: No admin role check. Anyone can change any user role.
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        // FIX 8: Role-based access control. Admin only.
+        if (($fakeUser['role'] ?? 'user') !== 'admin') {
+            return jsonResponse($response, ["error" => "Admin access required"], 403);
+        }
+
         $sql = "UPDATE users SET role = '$role' WHERE id = $id";
         $pdo->exec($sql);
 
-        $user = $pdo->query("SELECT * FROM users WHERE id = $id")->fetch();
+        // FIX 10: Only return safe fields, never password/password_hash.
+        $stmt = $pdo->prepare("SELECT id, name, email, role FROM users WHERE id = ?");
+        $stmt->execute([$id]);
+        $user = $stmt->fetch();
 
         return jsonResponse($response, [
-            'message' => 'User role changed without admin verification.',
-            'user' => $user,
-            'debug_received_body' => $data,
-            'debug_sql' => $sql
+            'message' => 'User role updated.',
+            'user' => $user
         ]);
     } catch (Throwable $e) {
         return exposeException($response, $e);
@@ -761,23 +727,24 @@ $app->put('/api/admin/users/{id}/role', function (Request $request, Response $re
 });
 
 $app->delete('/api/admin/persons/{id}', function (Request $request, Response $response, array $args) {
-    $decoded = getFakeUserFromToken($request);
-
-    if (!$decoded) {
-        return jsonResponse($response, [
-            "error" => "Unauthorized"
-        ], 401);
-    }
-
-    if ($decoded->role !== "admin") {
-        return jsonResponse($response, ["error" => "Admin access required"], 403);
-    }
-
     try {
         $pdo = getPDO();
         $id = $args['id'];
 
-        // INSECURE: No admin role check.
+        $fakeUser = getFakeUserFromToken($request);
+
+        // FIX 6: Reject requests without a valid token.
+        if (!$fakeUser) {
+            return jsonResponse($response, [
+                "error" => "Unauthorized"
+            ], 401);
+        }
+
+        // FIX 8: Role-based access control. Admin only.
+        if (($fakeUser['role'] ?? 'user') !== 'admin') {
+            return jsonResponse($response, ["error" => "Admin access required"], 403);
+        }
+
         $sql = "DELETE FROM persons WHERE id = $id";
         $pdo->exec($sql);
 
